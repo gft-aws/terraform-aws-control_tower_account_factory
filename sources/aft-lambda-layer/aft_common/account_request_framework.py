@@ -1,4 +1,4 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com, Inc. or its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 import json
@@ -6,17 +6,28 @@ import sys
 import uuid
 from datetime import datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, Dict, List, Sequence, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    cast,
+)
 
 from aft_common import aft_utils as utils
-from aft_common.account import Account
 from boto3.session import Session
 
 if TYPE_CHECKING:
     from mypy_boto3_servicecatalog.type_defs import (
-        ProvisionedProductDetailTypeDef,
+        ProvisionedProductAttributeTypeDef,
         ProvisioningParameterTypeDef,
         ProvisionProductOutputTypeDef,
+        SearchProvisionedProductsOutputTypeDef,
         UpdateProvisioningParameterTypeDef,
     )
 else:
@@ -24,20 +35,90 @@ else:
     ProvisionedProductDetailTypeDef = object
     ProvisionProductOutputTypeDef = object
     UpdateProvisioningParameterTypeDef = object
+    ProvisionedProductAttributeTypeDef = object
 
 
 logger = utils.get_logger()
 
 
+def get_healthy_ct_product_batch(
+    ct_management_session: Session,
+) -> Iterator[List[ProvisionedProductAttributeTypeDef]]:
+    sc_product_search_filter: Mapping[Literal["SearchQuery"], Sequence[str]] = {
+        "SearchQuery": [
+            "type:CONTROL_TOWER_ACCOUNT",
+        ]
+    }
+    sc_client = ct_management_session.client("servicecatalog")
+    logger.info(
+        "Searching Account Factory for account with matching email in healthy status"
+    )
+    # Get products with the required type
+    response: SearchProvisionedProductsOutputTypeDef = (
+        sc_client.search_provisioned_products(
+            Filters=sc_product_search_filter, PageSize=100
+        )
+    )
+    provisioned_products = response["ProvisionedProducts"]
+    sc_product_allowed_status = ["AVAILABLE", "TAINTED"]
+    healthy_products = [
+        product
+        for product in provisioned_products
+        if product["Status"] in sc_product_allowed_status
+    ]
+    yield healthy_products
+
+    while response.get("NextPageToken") is not None:
+        response = sc_client.search_provisioned_products(
+            Filters=sc_product_search_filter,
+            PageSize=100,
+            PageToken=response["NextPageToken"],
+        )
+
+        healthy_products = [
+            product
+            for product in provisioned_products
+            if product["Status"] in sc_product_allowed_status
+        ]
+        yield healthy_products
+
+
 def provisioned_product_exists(record: Dict[str, Any]) -> bool:
+    # Go get all my accounts from SC (Not all PPs)
     ct_management_session = utils.get_ct_management_session(aft_mgmt_session=Session())
-    account_name = utils.unmarshal_ddb_item(record["dynamodb"]["NewImage"])[
+    account_email = utils.unmarshal_ddb_item(record["dynamodb"]["NewImage"])[
         "control_tower_parameters"
-    ]["AccountName"]
-    provisioned_product = Account(
-        ct_management_session=ct_management_session, account_name=account_name
-    ).provisioned_product
-    return provisioned_product is not None
+    ]["AccountEmail"]
+
+    for batch in get_healthy_ct_product_batch(
+        ct_management_session=ct_management_session
+    ):
+        pp_ids = [product["Id"] for product in batch]
+
+        if email_exists_in_batch(account_email, pp_ids, ct_management_session):
+            return True
+
+    # We processed all batches of accounts with healthy statuses, and did not find a match
+    # It is possible that the account exists, but does not have a healthy status
+    logger.info(
+        "Did not find account with matching email in healthy status in Account Factory"
+    )
+
+    return False
+
+
+def email_exists_in_batch(
+    target_email: str, pps: List[str], ct_management_session: Session
+) -> bool:
+    sc_client = ct_management_session.client("servicecatalog")
+    for pp in pps:
+        pp_email = sc_client.get_provisioned_product_outputs(
+            ProvisionedProductId=pp, OutputKeys=["AccountEmail"]
+        )["Outputs"][0]["OutputValue"]
+        if target_email.lower() == pp_email.lower():
+            logger.info("Account email match found; provisioned product exists.")
+            return True
+    return False
 
 
 def insert_msg_into_acc_req_queue(
@@ -132,17 +213,18 @@ def new_ct_request_is_valid(session: Session, request: Dict[str, Any]) -> bool:
         logger.info("Requested AccountEmail is valid: " + ct_parameters["AccountEmail"])
         if ct_parameters["AccountName"] not in org_account_names:
             logger.info(
-                "Requested account_name is valid: " + ct_parameters["AccountName"]
+                "Valid request - AccountName and AccountEmail not already in use"
             )
             return True
         else:
             logger.info(
-                "Requested AccountName is NOT valid: " + ct_parameters["AccountName"]
+                "Invalid Request - AccountName already exists in Organization: "
+                + ct_parameters["AccountName"]
             )
             return False
     else:
         logger.info(
-            f"Requested AccountEmail is NOT valid: {ct_parameters['AccountEmail']}"
+            f"Invalid Request - AccountEmail already exists in Organization: {ct_parameters['AccountEmail']}"
         )
         return False
 
@@ -169,6 +251,14 @@ def add_header(request: Any, **kwargs: Any) -> None:
     )
 
 
+def create_provisioned_product_name(account_name: str) -> str:
+    """
+    Replaces all space characters in an Account Name with hyphens,
+    also removes all trailing and leading whitespace
+    """
+    return account_name.strip().replace(" ", "-")
+
+
 def create_new_account(
     session: Session, ct_management_session: Session, request: Dict[str, Any]
 ) -> ProvisionProductOutputTypeDef:
@@ -187,13 +277,15 @@ def create_new_account(
     logger.info(
         "Creating new account leveraging parameters: " + str(provisioning_parameters)
     )
-
+    provisioned_product_name = create_provisioned_product_name(
+        account_name=request["control_tower_parameters"]["AccountName"]
+    )
     response = client.provision_product(
         ProductId=utils.get_ct_product_id(session, ct_management_session),
         ProvisioningArtifactId=utils.get_ct_provisioning_artifact_id(
             session, ct_management_session
         ),
-        ProvisionedProductName=request["control_tower_parameters"]["AccountName"],
+        ProvisionedProductName=provisioned_product_name,
         ProvisioningParameters=cast(
             Sequence[ProvisioningParameterTypeDef], provisioning_parameters
         ),
@@ -217,68 +309,58 @@ def update_existing_account(
     for k, v in request["control_tower_parameters"].items():
         provisioning_parameters.append({"Key": k, "Value": v})
 
-    # Get all provisioned product IDs for "CONTROL_TOWER_ACCOUNT" type
-    provisioned_product_ids: List[ProvisionedProductDetailTypeDef] = []
-    scan_response = client.scan_provisioned_products(
-        AccessLevelFilter={"Key": "Account", "Value": "self"},
-    )
-
-    pps = scan_response["ProvisionedProducts"]
-    while "NextPageToken" in scan_response:
-        scan_response = client.scan_provisioned_products(
-            AccessLevelFilter={"Key": "Account", "Value": "self"},
-            PageToken=scan_response["NextPageToken"],
-        )
-        pps.extend(scan_response["ProvisionedProducts"])
-
-    for p in pps:
-        if p["Type"] == "CONTROL_TOWER_ACCOUNT":
-            provisioned_product_ids.append(
-                {
-                    "Id": p["Id"],
-                    "ProvisioningArtifactId": p["ProvisioningArtifactId"],
-                }
+    control_tower_email_parameter = request["control_tower_parameters"]["AccountEmail"]
+    target_product: Optional[ProvisionedProductAttributeTypeDef] = None
+    for batch in get_healthy_ct_product_batch(
+        ct_management_session=ct_management_session
+    ):
+        for product in batch:
+            product_outputs_response = client.get_provisioned_product_outputs(
+                ProvisionedProductId=product["Id"],
+                OutputKeys=[
+                    "AccountEmail",
+                ],
             )
+            provisioned_product_email = product_outputs_response["Outputs"][0][
+                "OutputValue"
+            ]
 
-    for p in provisioned_product_ids:
-        product_outputs_response = client.get_provisioned_product_outputs(
-            ProvisionedProductId=p["Id"],
-            OutputKeys=[
-                "AccountEmail",
-            ],
-        )
-
-        if (
-            product_outputs_response["Outputs"][0]["OutputValue"]
-            == request["control_tower_parameters"]["AccountEmail"]
-        ):
-            target_product_id = p["Id"]
-
-            # check to see if the product still exists and is still active
-            if utils.ct_provisioning_artifact_is_active(
-                session, ct_management_session, p["ProvisioningArtifactId"]
+            if (
+                provisioned_product_email.lower()
+                == control_tower_email_parameter.lower()
             ):
-                target_provisioning_artifact_id = p["ProvisioningArtifactId"]
-            else:
-                target_provisioning_artifact_id = utils.get_ct_provisioning_artifact_id(
-                    session, ct_management_session
-                )
+                target_product = product
+                break
 
-            logger.info(
-                "Modifying existing account leveraging parameters: "
-                + str(provisioning_parameters)
-                + " with provisioned product ID "
-                + target_product_id
-            )
-            update_response = client.update_provisioned_product(
-                ProvisionedProductId=target_product_id,
-                ProductId=utils.get_ct_product_id(session, ct_management_session),
-                ProvisioningArtifactId=target_provisioning_artifact_id,
-                ProvisioningParameters=provisioning_parameters,
-                UpdateToken=str(uuid.uuid1()),
-            )
-            logger.info(update_response)
-            break
+    if target_product is None:
+        raise Exception(
+            f"No healthy provisioned product found for {control_tower_email_parameter}"
+        )
+
+    # check to see if the product still exists and is still active
+    if utils.ct_provisioning_artifact_is_active(
+        session, ct_management_session, target_product["ProvisioningArtifactId"]
+    ):
+        target_provisioning_artifact_id = target_product["ProvisioningArtifactId"]
+    else:
+        target_provisioning_artifact_id = utils.get_ct_provisioning_artifact_id(
+            session, ct_management_session
+        )
+
+    logger.info(
+        "Modifying existing account leveraging parameters: "
+        + str(provisioning_parameters)
+        + " with provisioned product ID "
+        + target_product["Id"]
+    )
+    update_response = client.update_provisioned_product(
+        ProvisionedProductId=target_product["Id"],
+        ProductId=utils.get_ct_product_id(session, ct_management_session),
+        ProvisioningArtifactId=target_provisioning_artifact_id,
+        ProvisioningParameters=provisioning_parameters,
+        UpdateToken=str(uuid.uuid1()),
+    )
+    logger.info(update_response)
 
 
 def get_account_request_record(session: Session, id: str) -> Dict[str, Any]:

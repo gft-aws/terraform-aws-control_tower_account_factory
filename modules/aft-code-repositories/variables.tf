@@ -1,4 +1,4 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com, Inc. or its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 variable "vpc_id" {
@@ -87,4 +87,8 @@ variable "account_provisioning_customizations_repo_name" {
 
 variable "account_provisioning_customizations_repo_branch" {
   type = string
+}
+
+variable "global_codebuild_timeout" {
+  type = number
 }

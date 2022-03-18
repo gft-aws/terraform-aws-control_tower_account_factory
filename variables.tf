@@ -1,4 +1,4 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com, Inc. or its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #########################################
@@ -98,6 +98,19 @@ variable "aft_vpc_endpoints" {
   validation {
     condition     = contains([true, false], var.aft_vpc_endpoints)
     error_message = "Valid values for var: aft_vpc_endpoints are (true, false)."
+  }
+}
+
+variable "global_codebuild_timeout" {
+  type        = number
+  description = "Codebuild build timeout"
+  default     = 60
+  validation {
+    condition = (
+      var.global_codebuild_timeout >= 5 &&
+      var.global_codebuild_timeout <= 480
+    )
+    error_message = "Codebuild build timeout must be between 5 and 480 minutes."
   }
 }
 

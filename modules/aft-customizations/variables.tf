@@ -1,4 +1,4 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com, Inc. or its affiliates. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 variable "aft_config_backend_kms_key_id" {
@@ -114,4 +114,8 @@ variable "customizations_archive_path" {
 
 variable "customizations_archive_hash" {
   type = string
+}
+
+variable "global_codebuild_timeout" {
+  type = number
 }
