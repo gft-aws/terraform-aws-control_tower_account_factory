@@ -103,5 +103,5 @@ resource "aws_config_config_rule" "ConfigRule" {
   scope {
     compliance_resource_types = ["AWS::S3::Bucket"]
   }
-  depends_on = [aws_config_configuration_recorder.main]
+  depends_on = [aws_config_configuration_recorder.ConfigurationRecorder]
 }
