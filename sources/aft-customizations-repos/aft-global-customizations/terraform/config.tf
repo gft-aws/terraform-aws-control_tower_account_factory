@@ -22,8 +22,12 @@ resource "aws_config_configuration_recorder_status" "ConfigurationRecorderStatus
   depends_on = [ aws_config_delivery_channel.DeliveryChannel ]
 }
 
+resource "random_string" "random" {
+  length           = 12
+}
+
 resource "aws_s3_bucket" "S3BucketForConfig" {
-  bucket = "s3-config-bucket-kjhbfv"
+  bucket = "s3-config-bucket-${random_string.random}"
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "encryptS3" {
@@ -72,7 +76,7 @@ resource "aws_iam_role_policy" "ConfigIamRoleInlinePolicyRoleAttachment0" {
                 "s3:PutObject"
             ],
             "Resource": [
-                "arn:aws:s3:::s3-config-bucket-kjhbfv/*"
+                "arn:aws:s3:::s3-config-bucket-${random_string.random}/*"
             ],
             "Condition": {
                 "StringLike": {
@@ -85,7 +89,7 @@ resource "aws_iam_role_policy" "ConfigIamRoleInlinePolicyRoleAttachment0" {
             "Action": [
                 "s3:GetBucketAcl"
             ],
-            "Resource": "arn:aws:s3:::s3-config-bucket-kjhbfv"
+            "Resource": "arn:aws:s3:::s3-config-bucket-${random_string.random}"
         }
     ]
 }
